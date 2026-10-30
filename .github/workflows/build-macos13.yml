@@ -109,6 +109,29 @@ jobs:
           rw("NetNewsWire.xcodeproj/project.pbxproj",
              lambda s: s.replace("--sign \\\"${EXPANDED_CODE_SIGN_IDENTITY}\\\"", "--sign -"))
 
+          # 7. SF Symbols newer than macOS 13 would crash (force unwrap) -> use older look-alikes
+          def symbol_fix(s):
+              old = "\t\tself.init(systemSymbolName: symbol, accessibilityDescription: nil)\n"
+              new = (
+                  "\t\tlet macOS13Fallbacks: [String: String] = [\n"
+                  "\t\t\t\"text.page\": \"doc.text\",\n"
+                  "\t\t\t\"text.page.fill\": \"doc.text.fill\",\n"
+                  "\t\t\t\"text.page.slash\": \"exclamationmark.triangle\",\n"
+                  "\t\t\t\"document.on.document\": \"doc.on.doc\",\n"
+                  "\t\t\t\"bubbles.and.sparkles\": \"sparkles\"\n"
+                  "\t\t]\n"
+                  "\t\tvar resolvedName = symbol\n"
+                  "\t\tif NSImage(systemSymbolName: symbol, accessibilityDescription: nil) == nil {\n"
+                  "\t\t\tresolvedName = macOS13Fallbacks[symbol] ?? \"questionmark.square\"\n"
+                  "\t\t}\n"
+                  "\t\tself.init(systemSymbolName: resolvedName, accessibilityDescription: nil)\n"
+              )
+              if old in s:
+                  changed["symbols"] = 1
+                  return s.replace(old, new, 1)
+              return s
+          rw("Shared/Assets.swift", symbol_fix)
+
           print("Patch summary:", changed)
           left = [str(p) for p in root.rglob("*.swift") if "import Synchronization" in p.read_text(encoding="utf-8", errors="ignore")]
           if left:
