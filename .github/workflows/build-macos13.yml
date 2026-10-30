@@ -1,0 +1,152 @@
+name: Build NetNewsWire for macOS 13 (Intel)
+
+# Run this by hand: Actions tab -> "Build NetNewsWire for macOS 13 (Intel)" -> Run workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Get the source code
+        uses: actions/checkout@v5
+
+      - name: Select the newest Xcode 26
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+
+      - name: Patch the code so it works on macOS 13
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+
+          root = pathlib.Path(".")
+          changed = {"deploy": 0, "mutex": 0, "observable": 0, "werror": 0}
+
+          SHIM = '''
+          // ---- macOS 13 compatibility shim: replaces Synchronization.Mutex (macOS 15+) ----
+          fileprivate final class Mutex<Value>: @unchecked Sendable {
+              private let lockPointer: UnsafeMutablePointer<os_unfair_lock>
+              private var value: Value
+              init(_ initialValue: Value) {
+                  value = initialValue
+                  lockPointer = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+                  lockPointer.initialize(to: os_unfair_lock())
+              }
+              deinit {
+                  lockPointer.deinitialize(count: 1)
+                  lockPointer.deallocate()
+              }
+              func withLock<R>(_ body: (inout Value) throws -> R) rethrows -> R {
+                  os_unfair_lock_lock(lockPointer)
+                  defer { os_unfair_lock_unlock(lockPointer) }
+                  return try body(&value)
+              }
+          }
+          '''
+
+          def rw(path, fn):
+              p = pathlib.Path(path)
+              s = p.read_text(encoding="utf-8")
+              n = fn(s)
+              if n != s:
+                  p.write_text(n, encoding="utf-8")
+                  return True
+              return False
+
+          skip_dirs = {".git", "build", "Tests"}
+          for dirpath, dirnames, filenames in os.walk(root):
+              dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+              for f in filenames:
+                  path = os.path.join(dirpath, f)
+                  # 1. deployment targets
+                  if f == "Package.swift":
+                      if rw(path, lambda s: re.sub(r"\.macOS\(\.v\d+\)", ".macOS(.v13)", s)):
+                          changed["deploy"] += 1
+                  elif f.endswith(".xcconfig") or f == "project.pbxproj":
+                      if rw(path, lambda s: re.sub(r"MACOSX_DEPLOYMENT_TARGET = [0-9.]+", "MACOSX_DEPLOYMENT_TARGET = 13.0", s)):
+                          changed["deploy"] += 1
+                  # 2. Mutex shim + 3. @Observable
+                  elif f.endswith(".swift"):
+                      def fix(s):
+                          if "import Synchronization" in s:
+                              s = s.replace("import Synchronization", "import os")
+                              s = s.rstrip("\n") + "\n" + SHIM
+                              changed["mutex"] += 1
+                          if re.search(r"^\s*@Observable\b", s, re.M) or "@Observable @MainActor" in s:
+                              s = re.sub(r"@Observable\s+", "", s)
+                              changed["observable"] += 1
+                          return s
+                      rw(path, fix)
+            
+                  # 4. warnings-as-errors flags inside packages
+                  if f == "Package.swift":
+                      def nowerr(s):
+                          n = s.replace('"-warnings-as-errors"', '"-Wwarn"')
+                          if n != s: changed["werror"] += 1
+                          return n
+                      rw(path, nowerr)
+
+          print("Patch summary:", changed)
+          left = [str(p) for p in root.rglob("*.swift") if "import Synchronization" in p.read_text(encoding="utf-8", errors="ignore")]
+          if left:
+              print("WARNING: still importing Synchronization:", left); sys.exit(1)
+          if changed["mutex"] != 16 or changed["deploy"] < 10:
+              print("WARNING: unexpected counts (expected 16 mutex files). Source may have changed upstream.")
+          PY
+
+      - name: Generate source files the project needs
+        run: PROJECT_DIR="$GITHUB_WORKSPACE" ./buildscripts/updateSecrets.sh
+
+      - name: Build (Intel x86_64, no code signing)
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NetNewsWire.xcodeproj \
+            -scheme NetNewsWire \
+            -configuration Release \
+            -xcconfig .github/macos-ci-no-signing.xcconfig \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            -skipPackagePluginValidation -skipMacroValidation \
+            build 2>&1 | tee "$RUNNER_TEMP/build.log" | xcbeautify --renderer github-actions
+
+      - name: Show the errors (if the build failed)
+        if: failure()
+        run: |
+          echo "### Build errors" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u | head -60 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full build log (if the build failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+
+      - name: Sign locally (ad-hoc) and zip the app
+        run: |
+          APP="$RUNNER_TEMP/dd/Build/Products/Release/NetNewsWire.app"
+          test -d "$APP"
+          lipo -archs "$APP/Contents/MacOS/NetNewsWire"
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist"
+          codesign --force --deep --sign - "$APP"
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP" dist/NetNewsWire-macOS13-Intel.zip
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetNewsWire-macOS13-Intel
+          path: dist/NetNewsWire-macOS13-Intel.zip
+          retention-days: 30
