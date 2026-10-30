@@ -105,6 +105,10 @@ jobs:
                   if f.endswith(".swift"):
                       rw(os.path.join(dirpath, f), api_fixes)
 
+          # 6. Project script re-signs the share extension with an Apple identity we don't have -> ad-hoc
+          rw("NetNewsWire.xcodeproj/project.pbxproj",
+             lambda s: s.replace("--sign \\\"${EXPANDED_CODE_SIGN_IDENTITY}\\\"", "--sign -"))
+
           print("Patch summary:", changed)
           left = [str(p) for p in root.rglob("*.swift") if "import Synchronization" in p.read_text(encoding="utf-8", errors="ignore")]
           if left:
@@ -140,13 +144,17 @@ jobs:
         run: |
           {
             echo "### Build reported a problem"
-            echo "#### Lines mentioning error / failed"
+            echo "#### Real failure messages"
             echo '```'
-            grep -inE "error|failed|fatal|\*\* BUILD" "$RUNNER_TEMP/build.log" | grep -v "const_extract\|ErrorLog\|ErrorLogWindow" | sort -u -k2 | head -60 || true
+            grep -nE "(^|[^-])error:|BUILD FAILED|build commands failed|Command .* failed|failed with exit|Code Signing Error|Validation failed" "$RUNNER_TEMP/build.log" | grep -v "bin/clang\|bin/swift-frontend" | cut -c1-400 | head -40 || true
+            echo '```'
+            echo "#### Text around 'The following build commands failed'"
+            echo '```'
+            grep -n -A8 "The following build commands failed" "$RUNNER_TEMP/build.log" | cut -c1-400 | head -30 || true
             echo '```'
             echo "#### Last 60 lines of the log"
             echo '```'
-            tail -60 "$RUNNER_TEMP/build.log"
+            tail -60 "$RUNNER_TEMP/build.log" | cut -c1-400
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
