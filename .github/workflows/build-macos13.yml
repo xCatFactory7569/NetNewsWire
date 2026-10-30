@@ -91,6 +91,20 @@ jobs:
                           return n
                       rw(path, nowerr)
 
+          # 5. APIs newer than macOS 13
+          def api_fixes(s):
+              s = s.replace("placeholder.isHidden = true",
+                            "if #available(macOS 15.0, *) { placeholder.isHidden = true }")
+              s = s.replace("cursor: .columnResize)", "cursor: .resizeLeftRight)")
+              # SwiftUI onChange: new zero-argument form (macOS 14) -> old one-argument form
+              s = re.sub(r"(\.onChange\(of: [^\n{]*\)) \{\n", r"\1 { _ in\n", s)
+              return s
+          for dirpath, dirnames, filenames in os.walk(root):
+              dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+              for f in filenames:
+                  if f.endswith(".swift"):
+                      rw(os.path.join(dirpath, f), api_fixes)
+
           print("Patch summary:", changed)
           left = [str(p) for p in root.rglob("*.swift") if "import Synchronization" in p.read_text(encoding="utf-8", errors="ignore")]
           if left:
