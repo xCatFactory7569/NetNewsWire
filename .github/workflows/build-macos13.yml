@@ -86,7 +86,7 @@ jobs:
                   # 4. warnings-as-errors flags inside packages
                   if f == "Package.swift":
                       def nowerr(s):
-                          n = s.replace('"-warnings-as-errors"', '"-Wwarn"')
+                          n = s.replace('"-warnings-as-errors"', '"-no-warnings-as-errors"')
                           if n != s: changed["werror"] += 1
                           return n
                       rw(path, nowerr)
