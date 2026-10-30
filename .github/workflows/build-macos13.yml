@@ -117,6 +117,8 @@ jobs:
         run: PROJECT_DIR="$GITHUB_WORKSPACE" ./buildscripts/updateSecrets.sh
 
       - name: Build (Intel x86_64, no code signing)
+        id: build
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -133,22 +135,30 @@ jobs:
             -skipPackagePluginValidation -skipMacroValidation \
             build 2>&1 | tee "$RUNNER_TEMP/build.log" | xcbeautify --renderer github-actions
 
-      - name: Show the errors (if the build failed)
-        if: failure()
+      - name: Show diagnostics (if the build reported a problem)
+        if: steps.build.outcome == 'failure'
         run: |
-          echo "### Build errors" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u | head -60 >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Build reported a problem"
+            echo "#### Lines mentioning error / failed"
+            echo '```'
+            grep -inE "error|failed|fatal|\*\* BUILD" "$RUNNER_TEMP/build.log" | grep -v "const_extract\|ErrorLog\|ErrorLogWindow" | sort -u -k2 | head -60 || true
+            echo '```'
+            echo "#### Last 60 lines of the log"
+            echo '```'
+            tail -60 "$RUNNER_TEMP/build.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload full build log (if the build failed)
-        if: failure()
+      - name: Upload full build log
+        if: steps.build.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: ${{ runner.temp }}/build.log
 
       - name: Sign locally (ad-hoc) and zip the app
+        if: always()
         run: |
           APP="$RUNNER_TEMP/dd/Build/Products/Release/NetNewsWire.app"
           test -d "$APP"
@@ -159,6 +169,7 @@ jobs:
           ditto -c -k --keepParent "$APP" dist/NetNewsWire-macOS13-Intel.zip
 
       - name: Upload the app
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: NetNewsWire-macOS13-Intel
